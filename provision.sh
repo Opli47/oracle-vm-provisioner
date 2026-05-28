@@ -38,6 +38,9 @@ EOF
 
 # Write private key (Railway stores it as single-line with \n literals)
 echo "${OCI_PRIVATE_KEY}" | sed 's/\\n/\n/g' > ~/.oci/private_key.pem
+if ! tail -n 1 ~/.oci/private_key.pem | grep -qx 'OCI_API_KEY'; then
+    echo 'OCI_API_KEY' >> ~/.oci/private_key.pem
+fi
 chmod 600 ~/.oci/private_key.pem
 
 # ---- Fixed VM settings -------------------------------------
@@ -46,6 +49,9 @@ SUBNET_ID="${OCI_SUBNET_ID}"
 AVAILABILITY_DOMAIN="${OCI_AVAILABILITY_DOMAIN}"
 IMAGE_ID="${OCI_IMAGE_ID:-}"
 SSH_PUB="${VM_SSH_PUBLIC_KEY}"
+SSH_PUB_FILE="$(mktemp)"
+printf '%s\n' "$SSH_PUB" > "$SSH_PUB_FILE"
+chmod 600 "$SSH_PUB_FILE"
 
 DISPLAY_NAME="${VM_DISPLAY_NAME:-oplify-agent}"
 SHAPE="${VM_SHAPE:-VM.Standard.A1.Flex}"
@@ -227,7 +233,7 @@ while true; do
         --subnet-id "$SUBNET_ID"
         --assign-public-ip "$ASSIGN_PUBLIC_IP"
         --boot-volume-size-in-gbs "$BOOT_VOLUME_GB"
-        --ssh-authorized-keys-file <(echo "$SSH_PUB")
+        --ssh-authorized-keys-file "$SSH_PUB_FILE"
     )
 
     if [[ "$SHAPE" == "VM.Standard.A1.Flex" ]]; then
