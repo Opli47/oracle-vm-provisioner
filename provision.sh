@@ -11,6 +11,10 @@ REQUIRED_VARS="OCI_TENANCY OCI_USER OCI_FINGERPRINT OCI_PRIVATE_KEY OCI_REGION \
                OCI_COMPARTMENT_ID OCI_SUBNET_ID OCI_AVAILABILITY_DOMAIN \
                VM_SSH_PUBLIC_KEY"
 
+export OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING=True
+export SUPPRESS_LABEL_WARNING=True
+export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore::FutureWarning}"
+
 MISSING=0
 for VAR in $REQUIRED_VARS; do
     if [[ -z "${!VAR}" ]]; then
@@ -27,9 +31,6 @@ fi
 
 # ---- Write OCI config from env vars ------------------------
 mkdir -p ~/.oci
-export OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING=True
-export SUPPRESS_LABEL_WARNING=True
-export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore::FutureWarning}"
 cat > ~/.oci/config << EOF
 [DEFAULT]
 user=${OCI_USER}
@@ -286,8 +287,11 @@ while true; do
             log "VM is running. Instance: $INSTANCE_ID | IP: ${PUBLIC_IP:-none}"
         done
 
-    elif echo "$OUTPUT" | grep -qi "capacity\|Out of host capacity\|InternalError\|LimitExceeded\|host capacity\|429\|TooManyRequests\|QuotaExceeded\|RateLimitExceeded"; then
-        log "Capacity/rate limit in $CURRENT_AD."
+    elif echo "$OUTPUT" | grep -qi "capacity\|Out of host capacity\|InternalError\|LimitExceeded\|host capacity\|429\|TooManyRequests\|QuotaExceeded\|RateLimitExceeded\|RequestException\|ServiceError"; then
+        log "Capacity/rate/temporary OCI error in $CURRENT_AD."
+        if echo "$OUTPUT" | grep -qi "RequestException\|ServiceError"; then
+            log "OCI CLI returned a transient request/service exception. Will retry without changing AD."
+        fi
         log "Retrying in $((RETRY_INTERVAL / 60)) min..."
         ATTEMPT=$((ATTEMPT+1))
         sleep "$RETRY_INTERVAL"
