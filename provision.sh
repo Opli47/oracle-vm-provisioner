@@ -27,6 +27,9 @@ fi
 
 # ---- Write OCI config from env vars ------------------------
 mkdir -p ~/.oci
+export OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING=True
+export SUPPRESS_LABEL_WARNING=True
+export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore::FutureWarning}"
 cat > ~/.oci/config << EOF
 [DEFAULT]
 user=${OCI_USER}
@@ -104,13 +107,13 @@ int_lte() {
 
 # ---- Verify OCI CLI works ----------------------------------
 log "Verifying OCI CLI authentication..."
-TEST=$(oci iam region list --query 'data[0].name' --raw-output 2>&1)
+TEST=$(oci iam region-subscription list --tenancy-id "$OCI_TENANCY" --query 'length(data)' --raw-output 2>&1)
 if [[ $? -ne 0 ]]; then
     log "ERROR: OCI CLI auth failed. Check your env vars."
     log "Detail: $TEST"
     exit 1
 fi
-log "OCI CLI authenticated. Region check: $TEST"
+log "OCI CLI authenticated. Tenancy has access to $TEST subscribed region(s)."
 
 # ---- Free-tier guardrails ----------------------------------
 validate_number "VM_OCPUS" "$OCPUS"
