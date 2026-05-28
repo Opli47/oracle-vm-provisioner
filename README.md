@@ -1,147 +1,141 @@
-# Oracle VM Provisioner — Railway Deployment
+# Oracle VM Provisioner for Always Free OCI
 
-Runs 24/7 on Railway. Retries every 5 min until Oracle ARM capacity is available in Mumbai.
-No secrets in code — all config via Railway environment variables.
+Runs on Railway and retries until Oracle Cloud Infrastructure capacity is available for an Always Free VM.
 
----
+The default target is the current Always Free Arm shape:
 
-## Deploy in 5 steps
+- Shape: `VM.Standard.A1.Flex`
+- OCPUs: `4`
+- Memory: `24 GB`
+- Boot volume: `200 GB`
+- Region: your tenancy home region
+- Image: latest Ubuntu 22.04 image compatible with the selected shape
 
-### Step 1 — Push this repo to GitHub
+Oracle's Always Free guidance currently allows up to 4 OCPUs and 24 GB memory total for `VM.Standard.A1.Flex`, plus 200 GB total block volume storage in the tenancy home region. This provisioner now claims the full compute and block-volume allowance for one max-size free A1 VM.
 
-```bash
-git init
-git add .
-git commit -m "oracle vm provisioner"
-git remote add origin https://github.com/YOUR_USERNAME/oracle-vm-provisioner.git
-git push -u origin main
-```
-
-### Step 2 — Create Railway project
-
-1. Go to https://railway.app
-2. New Project -> Deploy from GitHub repo -> select this repo
-3. Railway detects Dockerfile and starts building
-
-### Step 3 — Add environment variables in Railway
-
-Go to your service -> Variables tab -> add each variable below.
+Source: https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm
 
 ---
 
-## Environment Variables
+## Deploy on Railway
 
-### Required — OCI Authentication
+1. Push this repo to GitHub.
+2. In Railway, create a new project from the GitHub repo.
+3. Railway detects the `Dockerfile` and starts the container.
+4. Add the environment variables below.
+5. Watch Railway logs until the VM is created.
 
-| Variable | Value |
+---
+
+## Required Environment Variables
+
+### OCI Authentication
+
+| Variable | Description |
 |---|---|
-| `OCI_TENANCY` | `ocid1.tenancy.oc1..aaaaaaaa7duoqojub334gbrhsiemwuuzcen5bzuuykrujvhx72xsc3embenq` |
-| `OCI_REGION` | `ap-mumbai-1` |
-| `OCI_COMPARTMENT_ID` | `ocid1.tenancy.oc1..aaaaaaaa7duoqojub334gbrhsiemwuuzcen5bzuuykrujvhx72xsc3embenq` |
-| `OCI_USER` | Get from: OCI Console -> Profile -> My Profile -> copy OCID |
-| `OCI_FINGERPRINT` | Get from: OCI Console -> Profile -> My Profile -> API Keys -> copy fingerprint |
-| `OCI_PRIVATE_KEY` | Contents of the private_key.pem file (see Step 4 below) |
+| `OCI_TENANCY` | Tenancy OCID |
+| `OCI_REGION` | Your tenancy home region, for example `ap-mumbai-1` |
+| `OCI_COMPARTMENT_ID` | Compartment OCID, often the tenancy OCID for the root compartment |
+| `OCI_USER` | User OCID from OCI Console -> Profile -> My Profile |
+| `OCI_FINGERPRINT` | API key fingerprint |
+| `OCI_PRIVATE_KEY` | Full private key PEM contents |
 
-### Required — VM Config
+### VM Placement
 
-| Variable | Value |
+| Variable | Description |
 |---|---|
-| `OCI_SUBNET_ID` | `ocid1.subnet.oc1.ap-mumbai-1.aaaaaaaaq4o4otcmx5g5gtcq7gbq2zhqqge2hw6hh3w2qyina6mybewn5g5a` |
-| `OCI_AVAILABILITY_DOMAIN` | `nhWd:AP-MUMBAI-1-AD-1` |
-| `OCI_IMAGE_ID` | `ocid1.image.oc1.ap-mumbai-1.aaaaaaaa2op2x2s5rnduo5osx6zojr526qxtrvhddkdhks5nllbwjzcylwya` |
-| `VM_SSH_PUBLIC_KEY` | Your SSH public key (from Cloud Shell: `cat ~/.ssh/oplify_vm_key.pub`) |
+| `OCI_SUBNET_ID` | Subnet OCID where the instance will be launched |
+| `OCI_AVAILABILITY_DOMAIN` | Availability domain name, for example `xxxx:AP-MUMBAI-1-AD-1` |
+| `VM_SSH_PUBLIC_KEY` | SSH public key to inject into the VM |
 
-### Optional — VM Sizing (defaults shown)
+`OCI_IMAGE_ID` is now optional. If omitted, the script looks up the latest Ubuntu image for the selected region, OS version, and shape.
+
+---
+
+## Optional Environment Variables
 
 | Variable | Default | Description |
-|---|---|---|
+|---|---:|---|
 | `VM_DISPLAY_NAME` | `oplify-agent` | Name shown in OCI Console |
-| `VM_OCPUS` | `4` | CPU count |
-| `VM_MEMORY_GB` | `24` | RAM in GB |
-| `VM_BOOT_VOLUME_GB` | `100` | Disk size in GB |
-| `RETRY_INTERVAL_SECONDS` | `300` | Seconds between retries (300 = 5 min) |
+| `VM_SHAPE` | `VM.Standard.A1.Flex` | Default Always Free Arm shape |
+| `VM_OCPUS` | `4` | OCPU count for A1 Flex |
+| `VM_MEMORY_GB` | `24` | Memory for A1 Flex |
+| `VM_BOOT_VOLUME_GB` | `200` | Boot disk size; consumes the full 200 GB Always Free block volume quota |
+| `OCI_IMAGE_ID` | empty | Optional explicit image OCID |
+| `OCI_IMAGE_OS` | `Canonical Ubuntu` | Used only when auto-looking up an image |
+| `OCI_IMAGE_OS_VERSION` | `22.04` | Used only when auto-looking up an image |
+| `ASSIGN_PUBLIC_IP` | `true` | Set `false` if you will connect through OCI Bastion/VPN/private networking |
+| `FREE_TIER_STRICT` | `true` | Enforces Always Free shape and size guardrails |
+| `RETRY_INTERVAL_SECONDS` | `300` | Retry delay after capacity/rate-limit errors |
 
 ---
 
-## Step 4 — Create OCI API Key (for OCI_USER, OCI_FINGERPRINT, OCI_PRIVATE_KEY)
+## Create OCI API Key
 
-Cloud Shell cannot authenticate Railway — you need a user API key:
+1. OCI Console -> profile avatar -> **My Profile**.
+2. Left sidebar -> **API Keys** -> **Add API Key**.
+3. Select **Generate API Key Pair** and download the private key.
+4. Copy the config snippet shown by OCI.
+5. Use `user`, `fingerprint`, and `tenancy` from that snippet.
+6. Paste the entire private key PEM into Railway as `OCI_PRIVATE_KEY`.
 
-1. OCI Console -> top-right profile avatar -> **My Profile**
-2. Left sidebar -> **API Keys** -> **Add API Key**
-3. Select **Generate API Key Pair** -> Download both files
-4. Copy the config snippet shown — it contains `user=`, `fingerprint=`, `tenancy=`
-5. Use those values for `OCI_USER` and `OCI_FINGERPRINT`
-6. Open the downloaded private key file -> copy entire contents
-7. Paste as `OCI_PRIVATE_KEY` in Railway (Railway handles multiline values fine)
+Railway supports multiline values. If your key is stored with literal `\n` characters, the script converts them back to newlines.
 
 ---
 
-## Step 5 — Watch logs
+## Logs
 
-Railway dashboard -> your service -> **Logs** tab.
+Expected log flow:
 
-You will see:
-```
-Attempt #1 | AD: nhWd:AP-MUMBAI-1-AD-1
-Capacity unavailable. Retrying in 5 min...
-Attempt #2 | AD: nhWd:AP-MUMBAI-1-AD-1
+```text
+Oplify Oracle Cloud VM Provisioner starting on Railway
+Shape    : VM.Standard.A1.Flex | 4 OCPU | 24GB RAM | 200GB disk
+Region   : ap-mumbai-1
+Using the full 200 GB Always Free block volume allowance for this VM.
+Attempt #1 | AD: ...
+Capacity/rate limit in ...
+Retrying in 5 min...
 ...
 VM CREATED SUCCESSFULLY
 Instance ID : ocid1.instance...
 Public IP   : x.x.x.x
-SSH: ssh -i oplify_vm_key ubuntu@x.x.x.x
 ```
 
-When you see the IP, SSH in using your saved private key.
+When capacity is unavailable, the script retries the single `OCI_AVAILABILITY_DOMAIN` you configured. Free OCI accounts are often effectively pinned to one availability domain, so this provisioner does not poll or rotate through other ADs.
 
 ---
 
-## SSH into the VM
+## SSH
 
-**Windows PowerShell:**
+If `ASSIGN_PUBLIC_IP=true`:
+
+```bash
+ssh -i oplify_vm_key ubuntu@<PUBLIC_IP>
 ```
+
+Windows PowerShell:
+
+```powershell
 ssh -i C:\Users\Sandeep\.ssh\oplify_vm_key ubuntu@<PUBLIC_IP>
 ```
 
-**Mac / Linux:**
-```bash
-chmod 600 ~/oplify_vm_key
-ssh -i ~/oplify_vm_key ubuntu@<PUBLIC_IP>
-```
+If `ASSIGN_PUBLIC_IP=false`, connect through OCI Bastion, VPN, or another private networking path.
 
 ---
 
-## After VM is created — stop the Railway service
+## After the VM Is Created
 
-Once the VM is running, the Railway service keeps logging every hour but does nothing.
-Stop it from Railway dashboard to save free tier hours:
-Service -> Settings -> Remove Service (or just pause deployment).
+Stop or remove the Railway service after the VM is running. The provisioner has done its job and does not need to consume Railway runtime continuously.
 
 ---
 
-## After SSH — open ports on the VM
+## Files
 
-```bash
-# Oracle Security List is set via OCI Console (Networking -> VCNs -> Security Lists)
-# Also run inside the VM:
-sudo iptables -I INPUT -p tcp --dport 22 -j ACCEPT
-sudo iptables -I INPUT -p tcp --dport 80 -j ACCEPT
-sudo iptables -I INPUT -p tcp --dport 443 -j ACCEPT
-sudo iptables -I INPUT -p tcp --dport 5678 -j ACCEPT
-sudo apt-get install -y iptables-persistent
-sudo netfilter-persistent save
-```
-
----
-
-## Files in this repo
-
-```
+```text
 oracle-vm-provisioner/
-├── Dockerfile      — builds container with OCI CLI installed
-├── provision.sh    — retry loop, reads all config from env vars
-└── README.md       — this file
+├── Dockerfile
+├── provision.sh
+└── README.md
 ```
 
-No secrets in any file. Safe to push to a public GitHub repo.
+No OCI secrets are stored in this repo. Keep all secrets in Railway environment variables.

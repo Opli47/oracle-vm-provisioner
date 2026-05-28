@@ -9,7 +9,7 @@
 # ---- Validate required env vars ----------------------------
 REQUIRED_VARS="OCI_TENANCY OCI_USER OCI_FINGERPRINT OCI_PRIVATE_KEY OCI_REGION \
                OCI_COMPARTMENT_ID OCI_SUBNET_ID OCI_AVAILABILITY_DOMAIN \
-               OCI_IMAGE_ID VM_SSH_PUBLIC_KEY"
+               VM_SSH_PUBLIC_KEY"
 
 MISSING=0
 for VAR in $REQUIRED_VARS; do
@@ -44,19 +44,57 @@ chmod 600 ~/.oci/private_key.pem
 COMPARTMENT_ID="${OCI_COMPARTMENT_ID}"
 SUBNET_ID="${OCI_SUBNET_ID}"
 AVAILABILITY_DOMAIN="${OCI_AVAILABILITY_DOMAIN}"
-IMAGE_ID="${OCI_IMAGE_ID}"
+IMAGE_ID="${OCI_IMAGE_ID:-}"
 SSH_PUB="${VM_SSH_PUBLIC_KEY}"
 
 DISPLAY_NAME="${VM_DISPLAY_NAME:-oplify-agent}"
-SHAPE="VM.Standard.A1.Flex"
+SHAPE="${VM_SHAPE:-VM.Standard.A1.Flex}"
 OCPUS="${VM_OCPUS:-4}"
 MEMORY_GB="${VM_MEMORY_GB:-24}"
-BOOT_VOLUME_GB="${VM_BOOT_VOLUME_GB:-100}"
+BOOT_VOLUME_GB="${VM_BOOT_VOLUME_GB:-200}"
 RETRY_INTERVAL="${RETRY_INTERVAL_SECONDS:-300}"
+ASSIGN_PUBLIC_IP="${ASSIGN_PUBLIC_IP:-true}"
+FREE_TIER_STRICT="${FREE_TIER_STRICT:-true}"
+OCI_IMAGE_OS="${OCI_IMAGE_OS:-Canonical Ubuntu}"
+OCI_IMAGE_OS_VERSION="${OCI_IMAGE_OS_VERSION:-22.04}"
 
 # ---- Helpers -----------------------------------------------
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
 hr()  { echo "-------------------------------------------------------------"; }
+
+die() {
+    log "ERROR: $1"
+    exit 1
+}
+
+is_true() {
+    [[ "${1,,}" == "true" || "$1" == "1" || "${1,,}" == "yes" ]]
+}
+
+validate_number() {
+    local name="$1" value="$2"
+    if ! [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        die "$name must be a number. Got: $value"
+    fi
+}
+
+validate_integer() {
+    local name="$1" value="$2"
+    if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+        die "$name must be an integer. Got: $value"
+    fi
+}
+
+float_lte() {
+    python3 - "$1" "$2" <<'PY'
+import sys
+print("1" if float(sys.argv[1]) <= float(sys.argv[2]) else "0")
+PY
+}
+
+int_lte() {
+    [[ "$1" -le "$2" ]]
+}
 
 # ---- Verify OCI CLI works ----------------------------------
 log "Verifying OCI CLI authentication..."
@@ -68,13 +106,67 @@ if [[ $? -ne 0 ]]; then
 fi
 log "OCI CLI authenticated. Region check: $TEST"
 
-# ---- Collect all ADs for rotation --------------------------
-get_all_ads() {
-    oci iam availability-domain list \
+# ---- Free-tier guardrails ----------------------------------
+validate_number "VM_OCPUS" "$OCPUS"
+validate_number "VM_MEMORY_GB" "$MEMORY_GB"
+validate_integer "VM_BOOT_VOLUME_GB" "$BOOT_VOLUME_GB"
+
+if is_true "$FREE_TIER_STRICT"; then
+    if [[ "$SHAPE" != "VM.Standard.A1.Flex" && "$SHAPE" != "VM.Standard.E2.1.Micro" ]]; then
+        die "FREE_TIER_STRICT=true allows only VM.Standard.A1.Flex or VM.Standard.E2.1.Micro. Got: $SHAPE"
+    fi
+
+    if [[ "$SHAPE" == "VM.Standard.A1.Flex" ]]; then
+        [[ "$(float_lte "$OCPUS" "4")" == "1" ]] || die "A1 Always Free allows 4 OCPUs total. Requested VM_OCPUS=$OCPUS"
+        [[ "$(float_lte "$MEMORY_GB" "24")" == "1" ]] || die "A1 Always Free allows 24 GB memory total. Requested VM_MEMORY_GB=$MEMORY_GB"
+    fi
+
+    int_lte "$BOOT_VOLUME_GB" 200 || die "Always Free block volume budget is 200 GB total. Requested boot volume: ${BOOT_VOLUME_GB}GB"
+    if [[ "$BOOT_VOLUME_GB" -lt 50 ]]; then
+        die "Use at least 50 GB for boot volume. OCI Always Free boot volumes commonly default to 50 GB."
+    fi
+
+    if [[ "$BOOT_VOLUME_GB" -eq 200 ]]; then
+        log "Using the full 200 GB Always Free block volume allowance for this VM."
+        log "Do not create additional boot/block volumes unless you intentionally move beyond Always Free."
+    fi
+fi
+
+# Warn if the configured region is not the tenancy home region. Always Free
+# compute/block volume resources must be created in the home region.
+HOME_REGION=$(oci iam region-subscription list \
+    --tenancy-id "$OCI_TENANCY" \
+    --query 'data[?"is-home-region"==`true`]."region-name"|[0]' \
+    --raw-output 2>/dev/null || true)
+
+if [[ -n "$HOME_REGION" && "$HOME_REGION" != "null" && "$HOME_REGION" != "$OCI_REGION" ]]; then
+    log "WARNING: OCI_REGION=$OCI_REGION but tenancy home region appears to be $HOME_REGION."
+    log "Always Free compute and boot volumes should be created in the home region."
+fi
+
+resolve_image_id() {
+    if [[ -n "$IMAGE_ID" ]]; then
+        echo "$IMAGE_ID"
+        return 0
+    fi
+
+    log "OCI_IMAGE_ID not set. Looking up latest Always Free-compatible image..." >&2
+    oci compute image list \
         --compartment-id "$COMPARTMENT_ID" \
-        --query 'data[*].name' --raw-output 2>/dev/null \
-        | tr -d '[]"' | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -v '^$'
+        --operating-system "$OCI_IMAGE_OS" \
+        --operating-system-version "$OCI_IMAGE_OS_VERSION" \
+        --shape "$SHAPE" \
+        --sort-by TIMECREATED \
+        --sort-order DESC \
+        --query 'data[0].id' \
+        --raw-output 2>/dev/null
 }
+
+IMAGE_ID="$(resolve_image_id)"
+if [[ -z "$IMAGE_ID" || "$IMAGE_ID" == "null" ]]; then
+    die "Could not resolve OCI image. Set OCI_IMAGE_ID manually, or adjust OCI_IMAGE_OS/OCI_IMAGE_OS_VERSION."
+fi
+log "Image ID : $IMAGE_ID"
 
 wait_for_running() {
     local id="$1" attempt=0
@@ -106,35 +198,43 @@ get_public_ip() {
 # ---- Main loop ---------------------------------------------
 hr
 log "Oplify Oracle Cloud VM Provisioner starting on Railway"
-log "Shape    : $SHAPE | ${OCPUS} OCPU | ${MEMORY_GB}GB RAM | ${BOOT_VOLUME_GB}GB disk"
+if [[ "$SHAPE" == "VM.Standard.A1.Flex" ]]; then
+    log "Shape    : $SHAPE | ${OCPUS} OCPU | ${MEMORY_GB}GB RAM | ${BOOT_VOLUME_GB}GB disk"
+else
+    log "Shape    : $SHAPE | fixed shape size | ${BOOT_VOLUME_GB}GB disk"
+fi
 log "Region   : ${OCI_REGION}"
 log "AD       : $AVAILABILITY_DOMAIN"
+log "Public IP: $ASSIGN_PUBLIC_IP"
+log "Strict AF: $FREE_TIER_STRICT"
 log "Retry    : every $((RETRY_INTERVAL / 60)) min on failure"
 hr
 
-ALL_ADS=$(get_all_ads)
-AD_LIST=($ALL_ADS)
-AD_INDEX=0
 CURRENT_AD="$AVAILABILITY_DOMAIN"
 ATTEMPT=1
-
-log "Available ADs: ${AD_LIST[*]}"
+log "Pinned AD : $CURRENT_AD"
 
 while true; do
     log "Attempt #$ATTEMPT | AD: $CURRENT_AD"
 
-    OUTPUT=$(oci compute instance launch \
-        --compartment-id "$COMPARTMENT_ID" \
-        --availability-domain "$CURRENT_AD" \
-        --display-name "$DISPLAY_NAME" \
-        --image-id "$IMAGE_ID" \
-        --shape "$SHAPE" \
-        --shape-config "{\"ocpus\": $OCPUS, \"memoryInGBs\": $MEMORY_GB}" \
-        --subnet-id "$SUBNET_ID" \
-        --assign-public-ip true \
-        --boot-volume-size-in-gbs "$BOOT_VOLUME_GB" \
-        --ssh-authorized-keys-file <(echo "$SSH_PUB") \
-        2>&1)
+    LAUNCH_ARGS=(
+        compute instance launch
+        --compartment-id "$COMPARTMENT_ID"
+        --availability-domain "$CURRENT_AD"
+        --display-name "$DISPLAY_NAME"
+        --image-id "$IMAGE_ID"
+        --shape "$SHAPE"
+        --subnet-id "$SUBNET_ID"
+        --assign-public-ip "$ASSIGN_PUBLIC_IP"
+        --boot-volume-size-in-gbs "$BOOT_VOLUME_GB"
+        --ssh-authorized-keys-file <(echo "$SSH_PUB")
+    )
+
+    if [[ "$SHAPE" == "VM.Standard.A1.Flex" ]]; then
+        LAUNCH_ARGS+=(--shape-config "{\"ocpus\": $OCPUS, \"memoryInGBs\": $MEMORY_GB}")
+    fi
+
+    OUTPUT=$(oci "${LAUNCH_ARGS[@]}" 2>&1)
 
     EXIT_CODE=$?
 
@@ -149,15 +249,19 @@ while true; do
         log "VM CREATED SUCCESSFULLY"
         hr
         log "Instance ID : $INSTANCE_ID"
-        log "Public IP   : $PUBLIC_IP"
+        log "Public IP   : ${PUBLIC_IP:-none}"
         log "Region      : ${OCI_REGION}"
         log "AD          : $CURRENT_AD"
         hr
-        log "SSH command (run on your local machine):"
-        log "  ssh -i oplify_vm_key ubuntu@$PUBLIC_IP"
-        log ""
-        log "Windows PowerShell:"
-        log "  ssh -i C:\Users\Sandeep\.ssh\oplify_vm_key ubuntu@$PUBLIC_IP"
+        if [[ -n "$PUBLIC_IP" && "$PUBLIC_IP" != "null" ]]; then
+            log "SSH command (run on your local machine):"
+            log "  ssh -i oplify_vm_key ubuntu@$PUBLIC_IP"
+            log ""
+            log "Windows PowerShell:"
+            log "  ssh -i C:\\Users\\Sandeep\\.ssh\\oplify_vm_key ubuntu@$PUBLIC_IP"
+        else
+            log "No public IP was assigned. Connect through OCI Bastion/VPN/private network."
+        fi
         hr
         log "NEXT STEPS:"
         log "  1. SSH into VM"
@@ -170,17 +274,11 @@ while true; do
         # Stay alive so Railway logs remain visible
         while true; do
             sleep 3600
-            log "VM is running. Instance: $INSTANCE_ID | IP: $PUBLIC_IP"
+            log "VM is running. Instance: $INSTANCE_ID | IP: ${PUBLIC_IP:-none}"
         done
 
     elif echo "$OUTPUT" | grep -qi "capacity\|Out of host capacity\|InternalError\|LimitExceeded\|host capacity\|429\|TooManyRequests\|QuotaExceeded\|RateLimitExceeded"; then
         log "Capacity/rate limit in $CURRENT_AD."
-        # Rotate AD
-        if [[ ${#AD_LIST[@]} -gt 1 ]]; then
-            AD_INDEX=$(( (AD_INDEX + 1) % ${#AD_LIST[@]} ))
-            CURRENT_AD="${AD_LIST[$AD_INDEX]}"
-            log "Rotating to next AD: $CURRENT_AD"
-        fi
         log "Retrying in $((RETRY_INTERVAL / 60)) min..."
         ATTEMPT=$((ATTEMPT+1))
         sleep "$RETRY_INTERVAL"
